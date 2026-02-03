@@ -207,25 +207,34 @@ ensure_models() {
 }
 
 parse_backend_info() {
-    local system_info="$1"
+    local output="$1"
     local backends=""
 
-    # Check for GPU backends
-    if [[ $system_info == *"CUDA = 1"* ]]; then
-        backends="CUDA"
-    elif [[ $system_info == *"VULKAN = 1"* ]]; then
+    # Check for actual GPU backend being used (from whisper_backend_init_gpu output)
+    if echo "$output" | grep -q "whisper_backend_init_gpu: using.*Vulkan"; then
         backends="Vulkan"
-    elif [[ $system_info == *"METAL = 1"* ]] || [[ $system_info == *"Metal : EMBED_LIBRARY = 1"* ]]; then
+    elif echo "$output" | grep -q "whisper_backend_init_gpu: using.*CUDA"; then
+        backends="CUDA"
+    elif echo "$output" | grep -q "whisper_backend_init_gpu: using.*Metal"; then
         backends="Metal"
-    elif [[ $system_info == *"SYCL = 1"* ]]; then
-        backends="SYCL"
-    elif [[ $system_info == *"COREML = 1"* ]]; then
+    elif echo "$output" | grep -q "COREML = 1"; then
         backends="CoreML"
+    elif echo "$output" | grep -q "SYCL = 1"; then
+        backends="SYCL"
     else
         backends="CPU"
     fi
 
-    # Check for SIMD features
+    # Extract GPU device name if available
+    local gpu_name
+    gpu_name=$(echo "$output" | grep "ggml_vulkan:.*=" | head -1 | sed -n 's/.*= *\([^(]*\).*/\1/p' | xargs)
+    if [ -n "$gpu_name" ] && [ "$backends" = "Vulkan" ]; then
+        backends="Vulkan ($gpu_name)"
+    fi
+
+    # Check for SIMD features from system_info
+    local system_info
+    system_info=$(echo "$output" | grep "system_info")
     local simd=""
     if [[ $system_info == *"AVX2 = 1"* ]]; then
         simd="AVX2"
@@ -237,8 +246,6 @@ parse_backend_info() {
 
     if [ -n "$simd" ] && [ "$backends" = "CPU" ]; then
         backends="CPU ($simd)"
-    elif [ -n "$simd" ]; then
-        backends="$backends + $simd"
     fi
 
     echo "$backends"
@@ -267,15 +274,11 @@ run_benchmark() {
     # Extract load time: "load time = %8.2f ms"
     load_time=$(echo "$output" | grep "load time" | sed -n 's/.*load time = *\([0-9.]*\) ms.*/\1/p' | tail -1)
 
-    # Extract backend info from system_info (only on first run)
+    # Extract backend info (only on first run)
     if [ -z "$BACKEND_INFO" ]; then
-        local system_info
-        system_info=$(echo "$output" | grep "system_info")
-        if [ -n "$system_info" ]; then
-            BACKEND_INFO=$(parse_backend_info "$system_info")
-            # Extract thread count
-            THREADS_INFO=$(echo "$system_info" | sed -n 's/.*n_threads = *\([0-9]*\).*/\1/p')
-        fi
+        BACKEND_INFO=$(parse_backend_info "$output")
+        # Extract thread count from system_info
+        THREADS_INFO=$(echo "$output" | grep "system_info" | sed -n 's/.*n_threads = *\([0-9]*\).*/\1/p')
     fi
 
     # Store results
